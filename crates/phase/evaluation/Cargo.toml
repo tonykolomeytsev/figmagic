@@ -5,7 +5,7 @@ edition.workspace = true
 
 [dependencies]
 phase_loading.workspace = true
-lib_figma.workspace = true
+lib_figma_fluent.workspace = true
 lib_label.workspace = true
 lib_cache.workspace = true
 lib_svg2compose.workspace = true
@@ -25,6 +25,7 @@ ureq.workspace = true
 num_cpus.workspace = true
 crossbeam-channel.workspace = true
 resvg.workspace = true
+ordermap.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

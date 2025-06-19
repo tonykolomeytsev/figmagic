@@ -1,5 +1,16 @@
+use crate::EvalContext;
+use crate::Result;
+use crate::actions::GetRemoteImageArgs;
+use crate::actions::convert_png_to_webp::ConvertPngToWebpArgs;
+use crate::actions::convert_png_to_webp::convert_png_to_webp;
+use crate::actions::get_node::ensure_is_vector_node;
+use crate::actions::get_remote_image;
+use crate::actions::materialize::MaterializeArgs;
+use crate::actions::materialize::materialize;
+use crate::actions::render_svg_to_png::RenderSvgToPngArgs;
+use crate::actions::render_svg_to_png::render_svg_to_png;
+use crate::figma::NodeMetadata;
 use lib_progress_bar::create_in_progress_item;
-use log::debug;
 use log::info;
 use phase_loading::AndroidDensity;
 use phase_loading::AndroidWebpProfile;
@@ -7,32 +18,7 @@ use phase_loading::ResourceAttrs;
 use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
 
-use crate::EvalContext;
-use crate::Result;
-use crate::actions::GetRemoteImageArgs;
-use crate::actions::convert_png_to_webp::ConvertPngToWebpArgs;
-use crate::actions::convert_png_to_webp::convert_png_to_webp;
-use crate::actions::get_node::GetNodeArgs;
-use crate::actions::get_node::ensure_is_vector_node;
-use crate::actions::get_node::get_node;
-use crate::actions::get_remote_image;
-use crate::actions::materialize::MaterializeArgs;
-use crate::actions::materialize::materialize;
-use crate::actions::render_svg_to_png::RenderSvgToPngArgs;
-use crate::actions::render_svg_to_png::render_svg_to_png;
-
 pub fn import_android_webp(ctx: &EvalContext, args: ImportAndroidWebpArgs) -> Result<()> {
-    debug!(
-        target: "Import",
-        "android-webp: {} ({})",
-        args.attrs.label.name,
-        args.profile
-            .scales
-            .iter()
-            .map(density_name)
-            .collect::<Vec<_>>()
-            .join(", "),
-    );
     let _guard = create_in_progress_item(args.attrs.label.name.as_ref());
 
     // region: generating all android variants
@@ -59,39 +45,38 @@ pub fn import_android_webp(ctx: &EvalContext, args: ImportAndroidWebpArgs) -> Re
                 format!("night-{density_name}")
             };
 
-            let node = get_node(
-                ctx,
-                GetNodeArgs {
-                    node_name: &node_name,
-                    remote: &args.attrs.remote,
-                    diag: &args.attrs.diag,
-                },
-            )?;
             let png = if args.profile.legacy_loader {
-                get_remote_image(
+                let png = get_remote_image(
                     ctx,
                     GetRemoteImageArgs {
                         label: &args.attrs.label,
                         remote: &args.attrs.remote,
-                        node: &node,
+                        node: &args.node,
                         format: "png",
                         scale: factor,
                         variant_name: &variant_name,
                     },
-                )?
+                )?;
+                if ctx.eval_args.fetch {
+                    return Ok(());
+                }
+                png
             } else {
-                ensure_is_vector_node(&node, node_name, &args.attrs.label, true);
+                ensure_is_vector_node(&args.node, node_name, &args.attrs.label, true);
                 let svg = get_remote_image(
                     ctx,
                     GetRemoteImageArgs {
                         label: &args.attrs.label,
                         remote: &args.attrs.remote,
-                        node: &node,
+                        node: &args.node,
                         format: "svg",
                         scale: 1.0,       // always the same yes
                         variant_name: "", // no variant yes
                     },
                 )?;
+                if ctx.eval_args.fetch {
+                    return Ok(());
+                }
                 render_svg_to_png(
                     ctx,
                     RenderSvgToPngArgs {
@@ -139,13 +124,22 @@ pub fn import_android_webp(ctx: &EvalContext, args: ImportAndroidWebpArgs) -> Re
 }
 
 pub struct ImportAndroidWebpArgs<'a> {
+    node: &'a NodeMetadata,
     attrs: &'a ResourceAttrs,
     profile: &'a AndroidWebpProfile,
 }
 
 impl<'a> ImportAndroidWebpArgs<'a> {
-    pub fn new(attrs: &'a ResourceAttrs, profile: &'a AndroidWebpProfile) -> Self {
-        Self { attrs, profile }
+    pub fn new(
+        node: &'a NodeMetadata,
+        attrs: &'a ResourceAttrs,
+        profile: &'a AndroidWebpProfile,
+    ) -> Self {
+        Self {
+            node,
+            attrs,
+            profile,
+        }
     }
 }
 

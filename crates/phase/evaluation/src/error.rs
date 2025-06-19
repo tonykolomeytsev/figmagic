@@ -4,6 +4,8 @@ use std::{
     path::PathBuf,
 };
 
+use phase_loading::Resource;
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug)]
@@ -12,8 +14,9 @@ pub enum Error {
     Cache(lib_cache::Error),
     WebpCreate,
     ImageDecode(image::ImageError),
-    FigmaApiNetwork(lib_figma::Error),
+    FigmaApiNetwork(lib_figma_fluent::Error),
     ExportImage(String),
+    IndexingRemote(String),
     FindNode {
         node_name: String,
         file: PathBuf,
@@ -48,8 +51,8 @@ impl From<image::ImageError> for Error {
     }
 }
 
-impl From<lib_figma::Error> for Error {
-    fn from(value: lib_figma::Error) -> Self {
+impl From<lib_figma_fluent::Error> for Error {
+    fn from(value: lib_figma_fluent::Error) -> Self {
         Self::FigmaApiNetwork(value)
     }
 }
@@ -60,8 +63,8 @@ impl From<lib_svg2compose::Error> for Error {
     }
 }
 
-impl From<retry::Error<lib_figma::Error>> for Error {
-    fn from(value: retry::Error<lib_figma::Error>) -> Self {
+impl From<retry::Error<lib_figma_fluent::Error>> for Error {
+    fn from(value: retry::Error<lib_figma_fluent::Error>) -> Self {
         value.error.into()
     }
 }
@@ -69,5 +72,21 @@ impl From<retry::Error<lib_figma::Error>> for Error {
 impl From<retry::Error<Error>> for Error {
     fn from(value: retry::Error<Error>) -> Self {
         value.error.into()
+    }
+}
+
+impl From<lib_figma_fluent::NodeStreamError> for Error {
+    fn from(value: lib_figma_fluent::NodeStreamError) -> Self {
+        Self::ExportImage(value.0)
+    }
+}
+
+impl From<&Resource> for Error {
+    fn from(value: &Resource) -> Self {
+        Self::FindNode {
+            node_name: value.attrs.node_name.clone(),
+            file: value.attrs.diag.file.to_path_buf(),
+            span: value.attrs.diag.definition_span.clone(),
+        }
     }
 }

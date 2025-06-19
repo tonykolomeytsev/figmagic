@@ -1,23 +1,18 @@
-use super::{Batched, Batcher, NodeMetadata, RemoteMetadata};
+use super::{Batched, Batcher, NodeMetadata};
 use crate::{Error, Result};
 use dashmap::DashMap;
 use key_mutex::KeyMutex;
 use lib_cache::{Cache, CacheKey};
-use lib_figma::{
-    FigmaApi, GetFileNodesQueryParameters, GetImageQueryParameters, GetImageResponse, Node,
-};
+use lib_figma_fluent::{FigmaApi, GetImageQueryParameters, GetImageResponse};
 use log::{debug, warn};
 use phase_loading::RemoteSource;
 use retry::delay::Fixed;
 use retry::retry_with_index;
 use retry::{OperationResult, delay::jitter};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::LazyLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-use std::{
-    collections::{HashMap, VecDeque},
-    sync::LazyLock,
-};
 use ureq::Error::Io;
 use ureq::Error::StatusCode;
 
@@ -34,7 +29,6 @@ pub struct FigmaRepository {
     batched_api: Arc<DashMap<BatchKey, ExportImgBatcher>>,
     cache: Cache,
     locks: KeyMutex<CacheKey, ()>,
-    refetch_done: Arc<AtomicBool>,
 }
 
 pub struct BatchedApi {
@@ -53,12 +47,11 @@ impl BatchKey {
     }
 }
 
-pub type ExportImgBatcher = Batcher<String, BatchedApi, lib_figma::Result<GetImageResponse>>;
+pub type ExportImgBatcher = Batcher<String, BatchedApi, lib_figma_fluent::Result<GetImageResponse>>;
 
 pub type DownloadUrl = String;
 
 impl FigmaRepository {
-    pub const REMOTE_SOURCE_TAG: u8 = 0x42;
     pub const EXPORTED_IMAGE_TAG: u8 = 0x43;
     pub const DOWNLOADED_IMAGE_TAG: u8 = 0x44;
 
@@ -68,68 +61,7 @@ impl FigmaRepository {
             batched_api: Arc::new(DashMap::new()),
             cache,
             locks: KeyMutex::new(),
-            refetch_done: Arc::new(AtomicBool::new(false)),
         }
-    }
-
-    pub fn get_remote(
-        &self,
-        remote: &RemoteSource,
-        refetch: bool,
-        on_fetch_start: impl FnOnce(),
-    ) -> Result<RemoteMetadata> {
-        // construct unique cache key
-        let cache_key = CacheKey::builder()
-            .set_tag(Self::REMOTE_SOURCE_TAG)
-            .write_str(&remote.file_key)
-            .write_str(&remote.container_node_ids.join(","))
-            .build();
-
-        // return cached value if it exists
-        if !refetch {
-            if let Some(metadata) = self.cache.get::<RemoteMetadata>(&cache_key)? {
-                return Ok(metadata);
-            }
-        }
-
-        // this section will be accessed by only one thread for one remote
-        let _lock = self.locks.lock(cache_key.clone()).unwrap();
-
-        // check if refetch really needed
-        let refetch = refetch && !self.refetch_done.swap(true, Ordering::SeqCst);
-
-        // return cached value if it exists
-        if !refetch {
-            if let Some(metadata) = self.cache.get::<RemoteMetadata>(&cache_key)? {
-                return Ok(metadata);
-            }
-        }
-
-        // otherwise, request value from remote
-        on_fetch_start();
-        let response = self.api.get_file_nodes(
-            &remote.access_token,
-            &remote.file_key,
-            GetFileNodesQueryParameters {
-                ids: Some(&remote.container_node_ids),
-                geometry: Some("paths"),
-                ..Default::default()
-            },
-        )?;
-
-        let metadata = {
-            let all_nodes: Vec<Node> = response
-                .nodes
-                .into_values()
-                .map(|node| node.document)
-                .collect();
-            extract_metadata(&all_nodes)
-        };
-
-        // remember result to cache
-        self.cache.put::<RemoteMetadata>(&cache_key, &metadata)?;
-        // return result and release lock
-        Ok(metadata)
     }
 
     pub fn export(
@@ -235,11 +167,6 @@ impl FigmaRepository {
                 Ok(response) => response,
                 Err(e) => return Err(Error::ExportImage(e.to_string())),
             };
-            if let Some(error) = &response.err {
-                return Err(Error::ExportImage(format!(
-                    "got response with error while exporting '{node_name}': {error}"
-                )));
-            }
             let download_url = match response.images.get(node_id) {
                 Some(url) => url,
                 None => {
@@ -285,7 +212,24 @@ impl FigmaRepository {
         }
 
         // otherwise, request value from remote
-        let response = self.api.download_resource(&remote.access_token, url);
+        let response = retry_with_index(Fixed::from_millis(1000).map(jitter), |_| {
+            match self.api.download_resource(&remote.access_token, url) {
+                Ok(value) => OperationResult::Ok(value),
+                Err(e) => match &e.0 {
+                    StatusCode(500..=599) => {
+                        debug!(target: "FigmaRepository", "figma server error: {e}");
+                        let _ = &*FIGMA_500_NOTIFICATION;
+                        OperationResult::Retry(Error::ExportImage(e.to_string()))
+                    }
+                    Io(err) if matches!(err.kind(), std::io::ErrorKind::UnexpectedEof) => {
+                        debug!(target: "FigmaRepository", "figma disconnected: {e}");
+                        let _ = &*FIGMA_500_NOTIFICATION;
+                        OperationResult::Retry(Error::ExportImage(e.to_string()))
+                    }
+                    _ => OperationResult::Err(Error::ExportImage(e.to_string())),
+                },
+            }
+        });
         let bytes = response?;
 
         // remember result to cache
@@ -295,42 +239,15 @@ impl FigmaRepository {
     }
 }
 
-/// Mapper from response to metadata
-fn extract_metadata(values: &[Node]) -> RemoteMetadata {
-    let mut queue = VecDeque::new();
-    let mut name_to_node = HashMap::new();
-    for value in values {
-        queue.push_back(value);
-    }
-    while let Some(current) = queue.pop_front() {
-        if !current.name.is_empty() && !name_to_node.contains_key(&current.name) {
-            name_to_node.insert(
-                current.name.clone(),
-                NodeMetadata {
-                    id: current.id.clone(),
-                    name: current.name.clone(),
-                    visible: current.visible,
-                    uses_raster_paints: !uses_only_vector_paints(current),
-                    hash: current.hash,
-                },
-            );
-        }
-        for child in &current.children {
-            queue.push_back(child);
-        }
-    }
-    RemoteMetadata { name_to_node }
-}
-
-impl Batched<String, lib_figma::Result<GetImageResponse>> for BatchedApi {
-    fn execute(&self, ids: Vec<String>) -> lib_figma::Result<GetImageResponse> {
+impl Batched<String, lib_figma_fluent::Result<GetImageResponse>> for BatchedApi {
+    fn execute(&self, ids: Vec<String>) -> lib_figma_fluent::Result<GetImageResponse> {
         let BatchedApi {
             api,
             remote,
             format,
             scale,
         } = self;
-        debug!(target: "FigmaRepository", "Batched request: ids={}; format={format}; scale={scale}", ids.join(","));
+        debug!(target: "FigmaRepository", "Batched request: ids=[{}]; format={format}; scale={scale}", ids.join(","));
         Ok(api.get_image(
             &remote.access_token,
             &remote.file_key,
@@ -342,9 +259,4 @@ impl Batched<String, lib_figma::Result<GetImageResponse>> for BatchedApi {
             },
         )?)
     }
-}
-
-fn uses_only_vector_paints(node: &Node) -> bool {
-    node.fills.iter().all(|it| it.r#type != "IMAGE")
-        && node.children.iter().all(uses_only_vector_paints)
 }
