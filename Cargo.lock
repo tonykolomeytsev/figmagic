@@ -1230,6 +1230,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lib_logging"
+version = "0.6.0"
+dependencies = [
+ "crossbeam-channel",
+ "crossterm",
+ "log",
+]
+
+[[package]]
 name = "lib_progress_bar"
 version = "0.6.0"
 dependencies = [
@@ -1552,6 +1561,7 @@ dependencies = [
  "lib_cache",
  "lib_figma_fluent",
  "lib_label",
+ "lib_logging",
  "lib_progress_bar",
  "lib_svg2compose",
  "log",
