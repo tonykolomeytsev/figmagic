@@ -113,6 +113,7 @@ pub fn evaluate(ws: Workspace, args: EvalArgs) -> Result<()> {
                     execute_with_cached_index(&ctx, resources, name_to_node)
                 }
                 Subscription::FromRemote(stream) => {
+                    info!(target: "Updating", "remote index {remote}");
                     execute_with_streaming_index(&ctx, resources, stream, handle, remote.clone())
                 }
             }
