@@ -123,7 +123,7 @@ impl FigmaRepository {
             .get(&batch_key)
             .expect("Value always exists");
         let no_requested_node_attempts = Arc::new(AtomicUsize::new(0));
-        let response = retry_with_index(Fixed::from_millis(5000).map(jitter), |attempt| {
+        let response = retry_with_index(Fixed::from_millis(500).map(jitter), |attempt| {
             if attempt > 1 {
                 debug!(target: "FigmaRepository" ,"retrying request: attempt #{}", attempt - 1);
             };
@@ -212,7 +212,7 @@ impl FigmaRepository {
         }
 
         // otherwise, request value from remote
-        let response = retry_with_index(Fixed::from_millis(1000).map(jitter), |_| {
+        let response = retry_with_index(Fixed::from_millis(250).map(jitter), |_| {
             match self.api.download_resource(&remote.access_token, url) {
                 Ok(value) => OperationResult::Ok(value),
                 Err(e) => match &e.0 {
