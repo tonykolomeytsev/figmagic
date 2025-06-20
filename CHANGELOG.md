@@ -1,5 +1,7 @@
 # Unreleased
 
+- Reduced latency for retrying. This speeds up resource downloads without increasing the number of errors from Figma REST API
+
 # 0.6.1
 
 - The `figx fetch` command no longer causes resource transformation. Only downloads from Figma.
